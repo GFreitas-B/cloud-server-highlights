@@ -2,10 +2,11 @@ const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const Database = require('better-sqlite3');
+const initSqlJs = require('sql.js');
 const { Resend } = require('resend');
 const { S3Client, PutObjectCommand, ListObjectsV2Command, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
@@ -21,27 +22,66 @@ app.use(cors({
 app.use(express.json());
 
 // ─── BANCO DE DADOS ─────────────────────────
-const db = new Database('./highlights.db');
+const DB_PATH = './highlights.db';
+let db;
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS usuarios (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    nome TEXT NOT NULL,
-    email TEXT UNIQUE NOT NULL,
-    senha TEXT NOT NULL,
-    verificado INTEGER DEFAULT 0,
-    criado_em DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
+async function iniciarBanco() {
+  const SQL = await initSqlJs();
 
-  CREATE TABLE IF NOT EXISTS codigos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT NOT NULL,
-    codigo TEXT NOT NULL,
-    tipo TEXT NOT NULL,
-    expira_em DATETIME NOT NULL,
-    usado INTEGER DEFAULT 0
-  );
-`);
+  if (fs.existsSync(DB_PATH)) {
+    const buffer = fs.readFileSync(DB_PATH);
+    db = new SQL.Database(buffer);
+  } else {
+    db = new SQL.Database();
+  }
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS usuarios (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      nome TEXT NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      senha TEXT NOT NULL,
+      verificado INTEGER DEFAULT 0,
+      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS codigos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL,
+      codigo TEXT NOT NULL,
+      tipo TEXT NOT NULL,
+      expira_em DATETIME NOT NULL,
+      usado INTEGER DEFAULT 0
+    )
+  `);
+
+  salvarBanco();
+  console.log('[DB] Banco de dados iniciado!');
+}
+
+function salvarBanco() {
+  const data = db.export();
+  fs.writeFileSync(DB_PATH, Buffer.from(data));
+}
+
+function dbRun(sql, params = []) {
+  db.run(sql, params);
+  salvarBanco();
+}
+
+function dbGet(sql, params = []) {
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  if (stmt.step()) {
+    const row = stmt.getAsObject();
+    stmt.free();
+    return row;
+  }
+  stmt.free();
+  return null;
+}
 
 // ─── RESEND ─────────────────────────
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -124,17 +164,17 @@ app.post('/auth/cadastro', async (req, res) => {
       return res.status(400).json({ erro: 'A senha deve ter pelo menos 6 caracteres' });
     }
 
-    const existente = db.prepare('SELECT id FROM usuarios WHERE email = ?').get(email);
+    const existente = dbGet('SELECT id FROM usuarios WHERE email = ?', [email]);
     if (existente) {
       return res.status(400).json({ erro: 'Email já cadastrado' });
     }
 
     const hash = await bcrypt.hash(senha, 10);
-    db.prepare('INSERT INTO usuarios (nome, email, senha) VALUES (?, ?, ?)').run(nome, email, hash);
+    dbRun('INSERT INTO usuarios (nome, email, senha) VALUES (?, ?, ?)', [nome, email, hash]);
 
     const codigo = gerarCodigo();
-    const expira = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 minutos
-    db.prepare('INSERT INTO codigos (email, codigo, tipo, expira_em) VALUES (?, ?, ?, ?)').run(email, codigo, 'verificacao', expira);
+    const expira = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    dbRun('INSERT INTO codigos (email, codigo, tipo, expira_em) VALUES (?, ?, ?, ?)', [email, codigo, 'verificacao', expira]);
 
     await enviarEmail(email, 'Verifique seu email - Highlights', `
       <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; background: #111; color: #fff; padding: 32px; border-radius: 16px;">
@@ -162,11 +202,11 @@ app.post('/auth/verificar', (req, res) => {
   try {
     const { email, codigo } = req.body;
 
-    const registro = db.prepare(`
+    const registro = dbGet(`
       SELECT * FROM codigos 
       WHERE email = ? AND codigo = ? AND tipo = 'verificacao' AND usado = 0
       ORDER BY id DESC LIMIT 1
-    `).get(email, codigo);
+    `, [email, codigo]);
 
     if (!registro) {
       return res.status(400).json({ erro: 'Código inválido' });
@@ -175,8 +215,8 @@ app.post('/auth/verificar', (req, res) => {
       return res.status(400).json({ erro: 'Código expirado' });
     }
 
-    db.prepare('UPDATE usuarios SET verificado = 1 WHERE email = ?').run(email);
-    db.prepare('UPDATE codigos SET usado = 1 WHERE id = ?').run(registro.id);
+    dbRun('UPDATE usuarios SET verificado = 1 WHERE email = ?', [email]);
+    dbRun('UPDATE codigos SET usado = 1 WHERE id = ?', [registro.id]);
 
     res.json({ ok: true, mensagem: 'Email verificado com sucesso!' });
   } catch (err) {
@@ -190,14 +230,14 @@ app.post('/auth/reenviar', async (req, res) => {
   try {
     const { email } = req.body;
 
-    const usuario = db.prepare('SELECT * FROM usuarios WHERE email = ?').get(email);
+    const usuario = dbGet('SELECT * FROM usuarios WHERE email = ?', [email]);
     if (!usuario) {
       return res.status(400).json({ erro: 'Email não encontrado' });
     }
 
     const codigo = gerarCodigo();
     const expira = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    db.prepare('INSERT INTO codigos (email, codigo, tipo, expira_em) VALUES (?, ?, ?, ?)').run(email, codigo, 'verificacao', expira);
+    dbRun('INSERT INTO codigos (email, codigo, tipo, expira_em) VALUES (?, ?, ?, ?)', [email, codigo, 'verificacao', expira]);
 
     await enviarEmail(email, 'Novo código de verificação - Highlights', `
       <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; background: #111; color: #fff; padding: 32px; border-radius: 16px;">
@@ -224,7 +264,7 @@ app.post('/auth/login', async (req, res) => {
   try {
     const { email, senha } = req.body;
 
-    const usuario = db.prepare('SELECT * FROM usuarios WHERE email = ?').get(email);
+    const usuario = dbGet('SELECT * FROM usuarios WHERE email = ?', [email]);
     if (!usuario) {
       return res.status(400).json({ erro: 'Email ou senha incorretos' });
     }
@@ -259,14 +299,14 @@ app.post('/auth/esqueci-senha', async (req, res) => {
   try {
     const { email } = req.body;
 
-    const usuario = db.prepare('SELECT * FROM usuarios WHERE email = ?').get(email);
+    const usuario = dbGet('SELECT * FROM usuarios WHERE email = ?', [email]);
     if (!usuario) {
       return res.status(400).json({ erro: 'Email não encontrado' });
     }
 
     const codigo = gerarCodigo();
     const expira = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    db.prepare('INSERT INTO codigos (email, codigo, tipo, expira_em) VALUES (?, ?, ?, ?)').run(email, codigo, 'reset', expira);
+    dbRun('INSERT INTO codigos (email, codigo, tipo, expira_em) VALUES (?, ?, ?, ?)', [email, codigo, 'reset', expira]);
 
     await enviarEmail(email, 'Recuperação de senha - Highlights', `
       <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; background: #111; color: #fff; padding: 32px; border-radius: 16px;">
@@ -294,11 +334,11 @@ app.post('/auth/verificar-reset', (req, res) => {
   try {
     const { email, codigo } = req.body;
 
-    const registro = db.prepare(`
+    const registro = dbGet(`
       SELECT * FROM codigos 
       WHERE email = ? AND codigo = ? AND tipo = 'reset' AND usado = 0
       ORDER BY id DESC LIMIT 1
-    `).get(email, codigo);
+    `, [email, codigo]);
 
     if (!registro) {
       return res.status(400).json({ erro: 'Código inválido' });
@@ -319,11 +359,11 @@ app.post('/auth/redefinir-senha', async (req, res) => {
   try {
     const { email, codigo, novaSenha } = req.body;
 
-    const registro = db.prepare(`
+    const registro = dbGet(`
       SELECT * FROM codigos 
       WHERE email = ? AND codigo = ? AND tipo = 'reset' AND usado = 0
       ORDER BY id DESC LIMIT 1
-    `).get(email, codigo);
+    `, [email, codigo]);
 
     if (!registro) {
       return res.status(400).json({ erro: 'Código inválido' });
@@ -333,8 +373,8 @@ app.post('/auth/redefinir-senha', async (req, res) => {
     }
 
     const hash = await bcrypt.hash(novaSenha, 10);
-    db.prepare('UPDATE usuarios SET senha = ? WHERE email = ?').run(hash, email);
-    db.prepare('UPDATE codigos SET usado = 1 WHERE id = ?').run(registro.id);
+    dbRun('UPDATE usuarios SET senha = ? WHERE email = ?', [hash, email]);
+    dbRun('UPDATE codigos SET usado = 1 WHERE id = ?', [registro.id]);
 
     res.json({ ok: true, mensagem: 'Senha redefinida com sucesso!' });
   } catch (err) {
@@ -437,6 +477,9 @@ app.get('/clips/:nome/signed', autenticarToken, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`☁️ Cloud server rodando em http://localhost:${PORT}`);
+// ─── INICIALIZAÇÃO ─────────────────────────
+iniciarBanco().then(() => {
+  app.listen(PORT, () => {
+    console.log(`☁️ Cloud server rodando em http://localhost:${PORT}`);
+  });
 });

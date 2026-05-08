@@ -3,16 +3,86 @@ const multer = require('multer');
 const cors = require('cors');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const Database = require('better-sqlite3');
+const { Resend } = require('resend');
 const { S3Client, PutObjectCommand, ListObjectsV2Command, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'x-api-key', 'Authorization'],
+}));
 app.use(express.json());
 
-// R2 Client
+// ─── BANCO DE DADOS ─────────────────────────
+const db = new Database('./highlights.db');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS usuarios (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    senha TEXT NOT NULL,
+    verificado INTEGER DEFAULT 0,
+    criado_em DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS codigos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    codigo TEXT NOT NULL,
+    tipo TEXT NOT NULL,
+    expira_em DATETIME NOT NULL,
+    usado INTEGER DEFAULT 0
+  );
+`);
+
+// ─── RESEND ─────────────────────────
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+async function enviarEmail(para, assunto, html) {
+  await resend.emails.send({
+    from: 'Highlights <noreply@highlights-replay.com.br>',
+    to: para,
+    subject: assunto,
+    html,
+  });
+}
+
+function gerarCodigo() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// ─── MIDDLEWARES ─────────────────────────
+function autenticar(req, res, next) {
+  const chave = req.headers['x-api-key'];
+  if (!chave || chave !== process.env.API_KEY) {
+    return res.status(401).json({ erro: 'Não autorizado' });
+  }
+  next();
+}
+
+function autenticarToken(req, res, next) {
+  const auth = req.headers['authorization'];
+  if (!auth) return res.status(401).json({ erro: 'Token não fornecido' });
+
+  const token = auth.replace('Bearer ', '');
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.usuario = decoded;
+    next();
+  } catch {
+    return res.status(401).json({ erro: 'Token inválido ou expirado' });
+  }
+}
+
+// ─── R2 CLIENT ─────────────────────────
 const r2 = new S3Client({
   region: 'auto',
   endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
@@ -24,16 +94,257 @@ const r2 = new S3Client({
 
 const BUCKET = process.env.R2_BUCKET_NAME;
 
-// Multer em memória (sem salvar em disco)
-const upload = multer({ storage: multer.memoryStorage() });
+// ─── MULTER ─────────────────────────
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'video/mp4') {
+      cb(null, true);
+    } else {
+      cb(new Error('Apenas arquivos MP4 são aceitos'));
+    }
+  }
+});
 
-// STATUS
+// ─── STATUS ─────────────────────────
 app.get('/status', (req, res) => {
   res.json({ status: 'online', timestamp: new Date() });
 });
 
-// UPLOAD
-app.post('/upload', upload.single('file'), async (req, res) => {
+// ─── AUTH: CADASTRO ─────────────────────────
+app.post('/auth/cadastro', async (req, res) => {
+  try {
+    const { nome, email, senha } = req.body;
+
+    if (!nome || !email || !senha) {
+      return res.status(400).json({ erro: 'Preencha todos os campos' });
+    }
+    if (senha.length < 6) {
+      return res.status(400).json({ erro: 'A senha deve ter pelo menos 6 caracteres' });
+    }
+
+    const existente = db.prepare('SELECT id FROM usuarios WHERE email = ?').get(email);
+    if (existente) {
+      return res.status(400).json({ erro: 'Email já cadastrado' });
+    }
+
+    const hash = await bcrypt.hash(senha, 10);
+    db.prepare('INSERT INTO usuarios (nome, email, senha) VALUES (?, ?, ?)').run(nome, email, hash);
+
+    const codigo = gerarCodigo();
+    const expira = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 minutos
+    db.prepare('INSERT INTO codigos (email, codigo, tipo, expira_em) VALUES (?, ?, ?, ?)').run(email, codigo, 'verificacao', expira);
+
+    await enviarEmail(email, 'Verifique seu email - Highlights', `
+      <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; background: #111; color: #fff; padding: 32px; border-radius: 16px;">
+        <div style="text-align: center; margin-bottom: 24px;">
+          <span style="background: #FFD600; color: #111; padding: 8px 16px; border-radius: 8px; font-weight: bold; font-size: 20px;">▶ Highlights</span>
+        </div>
+        <h2 style="text-align: center; color: #fff;">Bem-vindo, ${nome}!</h2>
+        <p style="color: #888; text-align: center;">Use o código abaixo para verificar seu email:</p>
+        <div style="background: #1a1a1a; border: 2px solid #FFD600; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
+          <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #FFD600;">${codigo}</span>
+        </div>
+        <p style="color: #555; text-align: center; font-size: 13px;">Este código expira em 15 minutos.</p>
+      </div>
+    `);
+
+    res.json({ ok: true, mensagem: 'Código enviado para o email' });
+  } catch (err) {
+    console.error('Erro cadastro:', err);
+    res.status(500).json({ erro: 'Erro ao cadastrar' });
+  }
+});
+
+// ─── AUTH: VERIFICAR EMAIL ─────────────────────────
+app.post('/auth/verificar', (req, res) => {
+  try {
+    const { email, codigo } = req.body;
+
+    const registro = db.prepare(`
+      SELECT * FROM codigos 
+      WHERE email = ? AND codigo = ? AND tipo = 'verificacao' AND usado = 0
+      ORDER BY id DESC LIMIT 1
+    `).get(email, codigo);
+
+    if (!registro) {
+      return res.status(400).json({ erro: 'Código inválido' });
+    }
+    if (new Date(registro.expira_em) < new Date()) {
+      return res.status(400).json({ erro: 'Código expirado' });
+    }
+
+    db.prepare('UPDATE usuarios SET verificado = 1 WHERE email = ?').run(email);
+    db.prepare('UPDATE codigos SET usado = 1 WHERE id = ?').run(registro.id);
+
+    res.json({ ok: true, mensagem: 'Email verificado com sucesso!' });
+  } catch (err) {
+    console.error('Erro verificação:', err);
+    res.status(500).json({ erro: 'Erro ao verificar' });
+  }
+});
+
+// ─── AUTH: REENVIAR CÓDIGO ─────────────────────────
+app.post('/auth/reenviar', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    const usuario = db.prepare('SELECT * FROM usuarios WHERE email = ?').get(email);
+    if (!usuario) {
+      return res.status(400).json({ erro: 'Email não encontrado' });
+    }
+
+    const codigo = gerarCodigo();
+    const expira = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    db.prepare('INSERT INTO codigos (email, codigo, tipo, expira_em) VALUES (?, ?, ?, ?)').run(email, codigo, 'verificacao', expira);
+
+    await enviarEmail(email, 'Novo código de verificação - Highlights', `
+      <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; background: #111; color: #fff; padding: 32px; border-radius: 16px;">
+        <div style="text-align: center; margin-bottom: 24px;">
+          <span style="background: #FFD600; color: #111; padding: 8px 16px; border-radius: 8px; font-weight: bold; font-size: 20px;">▶ Highlights</span>
+        </div>
+        <h2 style="text-align: center; color: #fff;">Novo código de verificação</h2>
+        <div style="background: #1a1a1a; border: 2px solid #FFD600; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
+          <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #FFD600;">${codigo}</span>
+        </div>
+        <p style="color: #555; text-align: center; font-size: 13px;">Este código expira em 15 minutos.</p>
+      </div>
+    `);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Erro reenvio:', err);
+    res.status(500).json({ erro: 'Erro ao reenviar código' });
+  }
+});
+
+// ─── AUTH: LOGIN ─────────────────────────
+app.post('/auth/login', async (req, res) => {
+  try {
+    const { email, senha } = req.body;
+
+    const usuario = db.prepare('SELECT * FROM usuarios WHERE email = ?').get(email);
+    if (!usuario) {
+      return res.status(400).json({ erro: 'Email ou senha incorretos' });
+    }
+    if (!usuario.verificado) {
+      return res.status(400).json({ erro: 'Email não verificado. Verifique sua caixa de entrada.' });
+    }
+
+    const senhaCorreta = await bcrypt.compare(senha, usuario.senha);
+    if (!senhaCorreta) {
+      return res.status(400).json({ erro: 'Email ou senha incorretos' });
+    }
+
+    const token = jwt.sign(
+      { id: usuario.id, email: usuario.email, nome: usuario.nome },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      ok: true,
+      token,
+      usuario: { id: usuario.id, nome: usuario.nome, email: usuario.email }
+    });
+  } catch (err) {
+    console.error('Erro login:', err);
+    res.status(500).json({ erro: 'Erro ao fazer login' });
+  }
+});
+
+// ─── AUTH: ESQUECI SENHA ─────────────────────────
+app.post('/auth/esqueci-senha', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    const usuario = db.prepare('SELECT * FROM usuarios WHERE email = ?').get(email);
+    if (!usuario) {
+      return res.status(400).json({ erro: 'Email não encontrado' });
+    }
+
+    const codigo = gerarCodigo();
+    const expira = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    db.prepare('INSERT INTO codigos (email, codigo, tipo, expira_em) VALUES (?, ?, ?, ?)').run(email, codigo, 'reset', expira);
+
+    await enviarEmail(email, 'Recuperação de senha - Highlights', `
+      <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; background: #111; color: #fff; padding: 32px; border-radius: 16px;">
+        <div style="text-align: center; margin-bottom: 24px;">
+          <span style="background: #FFD600; color: #111; padding: 8px 16px; border-radius: 8px; font-weight: bold; font-size: 20px;">▶ Highlights</span>
+        </div>
+        <h2 style="text-align: center; color: #fff;">Recuperação de senha</h2>
+        <p style="color: #888; text-align: center;">Use o código abaixo para redefinir sua senha:</p>
+        <div style="background: #1a1a1a; border: 2px solid #FFD600; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
+          <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #FFD600;">${codigo}</span>
+        </div>
+        <p style="color: #555; text-align: center; font-size: 13px;">Este código expira em 15 minutos.</p>
+      </div>
+    `);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Erro esqueci senha:', err);
+    res.status(500).json({ erro: 'Erro ao enviar código' });
+  }
+});
+
+// ─── AUTH: VERIFICAR RESET ─────────────────────────
+app.post('/auth/verificar-reset', (req, res) => {
+  try {
+    const { email, codigo } = req.body;
+
+    const registro = db.prepare(`
+      SELECT * FROM codigos 
+      WHERE email = ? AND codigo = ? AND tipo = 'reset' AND usado = 0
+      ORDER BY id DESC LIMIT 1
+    `).get(email, codigo);
+
+    if (!registro) {
+      return res.status(400).json({ erro: 'Código inválido' });
+    }
+    if (new Date(registro.expira_em) < new Date()) {
+      return res.status(400).json({ erro: 'Código expirado' });
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Erro verificar reset:', err);
+    res.status(500).json({ erro: 'Erro ao verificar código' });
+  }
+});
+
+// ─── AUTH: REDEFINIR SENHA ─────────────────────────
+app.post('/auth/redefinir-senha', async (req, res) => {
+  try {
+    const { email, codigo, novaSenha } = req.body;
+
+    const registro = db.prepare(`
+      SELECT * FROM codigos 
+      WHERE email = ? AND codigo = ? AND tipo = 'reset' AND usado = 0
+      ORDER BY id DESC LIMIT 1
+    `).get(email, codigo);
+
+    if (!registro) {
+      return res.status(400).json({ erro: 'Código inválido' });
+    }
+    if (new Date(registro.expira_em) < new Date()) {
+      return res.status(400).json({ erro: 'Código expirado' });
+    }
+
+    const hash = await bcrypt.hash(novaSenha, 10);
+    db.prepare('UPDATE usuarios SET senha = ? WHERE email = ?').run(hash, email);
+    db.prepare('UPDATE codigos SET usado = 1 WHERE id = ?').run(registro.id);
+
+    res.json({ ok: true, mensagem: 'Senha redefinida com sucesso!' });
+  } catch (err) {
+    console.error('Erro redefinir senha:', err);
+    res.status(500).json({ erro: 'Erro ao redefinir senha' });
+  }
+});
+
+// ─── UPLOAD ─────────────────────────
+app.post('/upload', autenticar, upload.single('file'), async (req, res) => {
   try {
     const file = req.file;
     const cameraId = req.body.camera_id;
@@ -52,11 +363,8 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       ContentType: file.mimetype,
     }));
 
-    // URL pública (requer domínio público ativado no R2)
     const url = `${process.env.R2_PUBLIC_URL}/${nome}`;
-
     console.log('📥 Upload enviado ao R2:', nome);
-
     res.json({ ok: true, url, nome, camera_id: cameraId });
 
   } catch (err) {
@@ -65,36 +373,48 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// LISTAR CLIPES
-app.get('/clips', async (req, res) => {
+// ─── LISTAR CLIPES ─────────────────────────
+app.get('/clips', autenticarToken, async (req, res) => {
   try {
-    const data = await r2.send(new ListObjectsV2Command({ Bucket: BUCKET }));
+    let arquivos = [];
+    let continuationToken = undefined;
 
-    const arquivos = (data.Contents || [])
-      .filter(f => f.Key.endsWith('.mp4'))
-      .map(f => ({
-        nome: f.Key,
-        url: `${process.env.R2_PUBLIC_URL}/${f.Key}`,
-        tamanho: f.Size,
-        criado: f.LastModified,
-      }))
-      .sort((a, b) => new Date(b.criado) - new Date(a.criado));
+    do {
+      const data = await r2.send(new ListObjectsV2Command({
+        Bucket: BUCKET,
+        ContinuationToken: continuationToken,
+      }));
 
+      const pagina = (data.Contents || [])
+        .filter(f => f.Key.endsWith('.mp4'))
+        .map(f => ({
+          nome: f.Key,
+          url: `${process.env.R2_PUBLIC_URL}/${f.Key}`,
+          tamanho: f.Size,
+          criado: f.LastModified,
+        }));
+
+      arquivos = arquivos.concat(pagina);
+      continuationToken = data.IsTruncated ? data.NextContinuationToken : undefined;
+
+    } while (continuationToken);
+
+    arquivos.sort((a, b) => new Date(b.criado) - new Date(a.criado));
     res.json(arquivos);
+
   } catch (err) {
     console.error('Erro ao listar:', err);
     res.status(500).json({ erro: 'Erro ao listar clipes' });
   }
 });
 
-// DELETAR CLIPE
-app.delete('/clips/:nome', async (req, res) => {
+// ─── DELETAR CLIPE ─────────────────────────
+app.delete('/clips/:nome', autenticarToken, async (req, res) => {
   try {
     await r2.send(new DeleteObjectCommand({
       Bucket: BUCKET,
       Key: req.params.nome,
     }));
-
     res.json({ ok: true });
   } catch (err) {
     console.error('Erro ao deletar:', err);
@@ -102,15 +422,14 @@ app.delete('/clips/:nome', async (req, res) => {
   }
 });
 
-// URL ASSINADA (acesso temporário sem URL pública)
-app.get('/clips/:nome/signed', async (req, res) => {
+// ─── URL ASSINADA ─────────────────────────
+app.get('/clips/:nome/signed', autenticarToken, async (req, res) => {
   try {
     const url = await getSignedUrl(
       r2,
       new GetObjectCommand({ Bucket: BUCKET, Key: req.params.nome }),
-      { expiresIn: 3600 } // 1 hora
+      { expiresIn: 3600 }
     );
-
     res.json({ url });
   } catch (err) {
     console.error('Erro ao gerar URL:', err);

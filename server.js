@@ -82,6 +82,15 @@ async function iniciarBanco() {
     )
   `);
 
+  await pool.query(`
+  CREATE TABLE IF NOT EXISTS clips (
+    id SERIAL PRIMARY KEY,
+    nome TEXT UNIQUE NOT NULL,
+    usuario_id INTEGER NOT NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
   console.log('[DB] Banco de dados PostgreSQL iniciado!');
 }
 
@@ -425,6 +434,11 @@ app.post('/upload', autenticarToken, upload.single('file'), async (req, res) => 
       ContentType: file.mimetype,
     }));
 
+    await pool.query(
+      'INSERT INTO clips (nome, usuario_id) VALUES ($1, $2)',
+      [nome, req.usuario.id]
+    );
+
     const novoClipe = {
       nome,
       url: `${process.env.R2_PUBLIC_URL}/${nome}`,
@@ -481,11 +495,32 @@ app.get('/clips', autenticarToken, async (req, res) => {
 // ─── DELETAR CLIPE ─────────────────────────
 app.delete('/clips/:nome', autenticarToken, async (req, res) => {
   try {
+
+    const clip = await pool.query(
+      'SELECT * FROM clips WHERE nome = $1',
+      [req.params.nome]
+    );
+
+    if (clip.rows.length === 0) {
+      return res.status(404).json({ erro: 'Clipe não encontrado' });
+    }
+
+    if (clip.rows[0].usuario_id !== req.usuario.id) {
+      return res.status(403).json({ erro: 'Sem permissão' });
+    }
+
     await r2.send(new DeleteObjectCommand({
       Bucket: BUCKET,
       Key: req.params.nome,
     }));
+
+    await pool.query(
+      'DELETE FROM clips WHERE nome = $1',
+      [req.params.nome]
+    );
+
     res.json({ ok: true });
+
   } catch (err) {
     console.error('Erro ao deletar:', err);
     res.status(500).json({ erro: 'Erro ao deletar' });

@@ -1,4 +1,5 @@
 const express = require('express');
+const helmet = require('helmet');
 const WebSocket = require('ws');
 const http = require('http');
 const multer = require('multer');
@@ -8,6 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
+const rateLimit = require('express-rate-limit');
 const { Resend } = require('resend');
 const {
   S3Client,
@@ -44,11 +46,19 @@ function notificarNovoClipe(clipe) {
 
 // ─── MIDDLEWARES ─────────────────────────
 app.use(cors({
-  origin: '*',
+  origin: [
+    'http://localhost:5173',
+    'https://highlights-replay.com.br'
+  ],
   methods: ['GET', 'POST', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'x-api-key', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
 }));
 app.use(express.json());
+
+app.use(helmet({
+  crossOriginResourcePolicy: false,
+}));
 
 // ─── BANCO DE DADOS POSTGRESQL ─────────────────────────
 const pool = new Pool({
@@ -166,8 +176,40 @@ app.get('/status', (req, res) => {
   });
 });
 
+// ─── RATE LIMIT ─────────────────────────
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: {
+    erro: 'Muitas tentativas de login. Tente novamente em 15 minutos.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const resetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: {
+    erro: 'Muitas solicitações. Aguarde alguns minutos.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const verifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: {
+    erro: 'Muitas tentativas. Aguarde alguns minutos.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // ─── AUTH: CADASTRO ─────────────────────────
-app.post('/auth/cadastro', async (req, res) => {
+app.post('/auth/login', loginLimiter, async (req, res) => {
   try {
     const { nome, email, senha } = req.body;
 
@@ -215,7 +257,7 @@ app.post('/auth/cadastro', async (req, res) => {
 });
 
 // ─── AUTH: VERIFICAR EMAIL ─────────────────────────
-app.post('/auth/verificar', async (req, res) => {
+app.post('/auth/verificar', verifyLimiter, async (req, res) => {
   try {
     const { email, codigo } = req.body;
 
@@ -319,7 +361,7 @@ app.post('/auth/login', async (req, res) => {
 });
 
 // ─── AUTH: ESQUECI SENHA ─────────────────────────
-app.post('/auth/esqueci-senha', async (req, res) => {
+app.post('/auth/esqueci-senha', resetLimiter, async (req, res) => {
   try {
     const { email } = req.body;
 
@@ -357,7 +399,7 @@ app.post('/auth/esqueci-senha', async (req, res) => {
 });
 
 // ─── AUTH: VERIFICAR RESET ─────────────────────────
-app.post('/auth/verificar-reset', async (req, res) => {
+app.post('/auth/verificar-reset', verifyLimiter, async (req, res) => {
   try {
     const { email, codigo } = req.body;
 

@@ -406,7 +406,7 @@ app.post('/auth/redefinir-senha', async (req, res) => {
 });
 
 // ─── UPLOAD ─────────────────────────
-app.post('/upload', autenticar, upload.single('file'), async (req, res) => {
+app.post('/upload', autenticarToken, upload.single('file'), async (req, res) => {
   try {
     const file = req.file;
     const cameraId = req.body.camera_id;
@@ -431,6 +431,7 @@ app.post('/upload', autenticar, upload.single('file'), async (req, res) => {
       tamanho: file.size,
       criado: new Date(),
       camera_id: cameraId,
+      usuario_id: req.usuario.id,
     };
 
     console.log('📥 Upload enviado ao R2:', nome);

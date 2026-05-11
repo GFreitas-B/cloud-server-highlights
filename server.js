@@ -58,7 +58,6 @@ const pool = new Pool({
   },
 });
 
-console.log('DATABASE_URL:', process.env.DATABASE_URL);
 
 async function iniciarBanco() {
   await pool.query(`

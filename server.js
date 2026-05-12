@@ -841,6 +841,41 @@ app.post('/upload', autenticarCamera, upload.single('file'), async (req, res) =>
   }
 });
 
+// ─── DOWNLOAD DO CLIPE ─────────────────────────
+app.get('/clips/:nome/download', autenticarToken, async (req, res) => {
+  try {
+    const clip = await pool.query(
+      `
+      SELECT nome
+      FROM clips
+      WHERE nome = $1
+      LIMIT 1
+      `,
+      [req.params.nome]
+    );
+
+    if (clip.rows.length === 0) {
+      return res.status(404).json({ erro: 'Clipe não encontrado' });
+    }
+
+    const downloadUrl = await getSignedUrl(
+      r2,
+      new GetObjectCommand({
+        Bucket: BUCKET,
+        Key: req.params.nome,
+        ResponseContentDisposition: `attachment; filename="${req.params.nome}"`,
+        ResponseContentType: 'video/mp4',
+      }),
+      { expiresIn: 300 }
+    );
+
+    res.json({ url: downloadUrl });
+  } catch (err) {
+    console.error('Erro ao gerar download:', err);
+    res.status(500).json({ erro: 'Erro ao gerar download' });
+  }
+});
+
 // ─── DELETAR CLIPE ─────────────────────────
 app.delete('/clips/:nome', autenticarToken, async (req, res) => {
   try {

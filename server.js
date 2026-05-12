@@ -502,31 +502,21 @@ app.post('/upload', autenticarToken, upload.single('file'), async (req, res) => 
 // ─── LISTAR CLIPES ─────────────────────────
 app.get('/clips', autenticarToken, async (req, res) => {
   try {
-    let arquivos = [];
-    let continuationToken = undefined;
 
-    do {
-      const data = await r2.send(new ListObjectsV2Command({
-        Bucket: BUCKET,
-        ContinuationToken: continuationToken,
-      }));
+    // Busca apenas clips do usuário
+    const resultado = await pool.query(
+      'SELECT nome, criado_em FROM clips WHERE usuario_id = $1 ORDER BY criado_em DESC',
+      [req.usuario.id]
+    );
 
-      const pagina = (data.Contents || [])
-        .filter(f => f.Key.endsWith('.mp4'))
-        .map(f => ({
-          nome: f.Key,
-          url: `${process.env.R2_PUBLIC_URL}/${f.Key}`,
-          tamanho: f.Size,
-          criado: f.LastModified,
-        }));
+    const arquivos = resultado.rows.map(clip => ({
+      nome: clip.nome,
+      url: `${process.env.R2_PUBLIC_URL}/${clip.nome}`,
+      criado: clip.criado_em,
+    }));
 
-      arquivos = arquivos.concat(pagina);
-      continuationToken = data.IsTruncated ? data.NextContinuationToken : undefined;
-
-    } while (continuationToken);
-
-    arquivos.sort((a, b) => new Date(b.criado) - new Date(a.criado));
     res.json(arquivos);
+
   } catch (err) {
     console.error('Erro ao listar:', err);
     res.status(500).json({ erro: 'Erro ao listar clipes' });

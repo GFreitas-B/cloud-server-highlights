@@ -208,7 +208,7 @@ const verifyLimiter = rateLimit({
 });
 
 // ─── AUTH: CADASTRO ─────────────────────────
-app.post('/auth/login', loginLimiter, async (req, res) => {
+app.post('/auth/cadastro', loginLimiter, async (req, res) => {
   try {
     const { nome, email, senha } = req.body;
 

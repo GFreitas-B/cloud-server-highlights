@@ -21,19 +21,20 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
 app.set('trust proxy', 1);
+
 const server = http.createServer(app);
 const PORT = process.env.PORT || 4000;
 
 // ─── WEBSOCKET ─────────────────────────
 const wss = new WebSocket.Server({ server });
-const clientes = new Set();
+const clientesWs = new Set();
 
 wss.on('connection', (ws) => {
-  clientes.add(ws);
+  clientesWs.add(ws);
   console.log('📱 Cliente conectado no WebSocket');
 
   ws.on('close', () => {
-    clientes.delete(ws);
+    clientesWs.delete(ws);
     console.log('❌ Cliente desconectado');
   });
 });
@@ -44,7 +45,7 @@ function notificarNovoClipe(clipe) {
     clipe,
   });
 
-  clientes.forEach((ws) => {
+  clientesWs.forEach((ws) => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(mensagem);
     }
@@ -68,7 +69,7 @@ app.use(helmet({
   crossOriginResourcePolicy: false,
 }));
 
-// ─── BANCO DE DADOS POSTGRESQL ─────────────────────────
+// ─── BANCO ─────────────────────────
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
@@ -102,7 +103,7 @@ async function iniciarBanco() {
       id SERIAL PRIMARY KEY,
       usuario_id INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
       cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
-      papel TEXT DEFAULT 'jogador',
+      papel TEXT DEFAULT 'admin',
       criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(usuario_id, cliente_id)
     )
@@ -190,67 +191,6 @@ function autenticarToken(req, res, next) {
   }
 }
 
-async function verificarAcessoCliente(req, res, next) {
-  try {
-    const clienteId = Number(req.params.clienteId);
-
-    if (!clienteId) {
-      return res.status(400).json({ erro: 'Cliente inválido' });
-    }
-
-    const acesso = await pool.query(
-      `
-      SELECT 1
-      FROM usuarios_clientes
-      WHERE usuario_id = $1 AND cliente_id = $2
-      LIMIT 1
-      `,
-      [req.usuario.id, clienteId]
-    );
-
-    if (acesso.rows.length === 0) {
-      return res.status(403).json({ erro: 'Sem acesso a este cliente' });
-    }
-
-    req.clienteId = clienteId;
-    next();
-  } catch (err) {
-    console.error('Erro ao verificar acesso ao cliente:', err);
-    res.status(500).json({ erro: 'Erro de permissão' });
-  }
-}
-
-async function verificarAcessoQuadra(req, res, next) {
-  try {
-    const quadraId = Number(req.params.quadraId);
-
-    if (!quadraId) {
-      return res.status(400).json({ erro: 'Quadra inválida' });
-    }
-
-    const acesso = await pool.query(
-      `
-      SELECT q.id, q.cliente_id
-      FROM quadras q
-      INNER JOIN usuarios_clientes uc ON uc.cliente_id = q.cliente_id
-      WHERE q.id = $1 AND uc.usuario_id = $2 AND q.ativa = true
-      LIMIT 1
-      `,
-      [quadraId, req.usuario.id]
-    );
-
-    if (acesso.rows.length === 0) {
-      return res.status(403).json({ erro: 'Sem acesso a esta quadra' });
-    }
-
-    req.quadra = acesso.rows[0];
-    next();
-  } catch (err) {
-    console.error('Erro ao verificar acesso à quadra:', err);
-    res.status(500).json({ erro: 'Erro de permissão' });
-  }
-}
-
 async function autenticarCamera(req, res, next) {
   try {
     const apiKey = req.headers['x-api-key'];
@@ -281,7 +221,7 @@ async function autenticarCamera(req, res, next) {
   }
 }
 
-// ─── R2 CLIENT ─────────────────────────
+// ─── R2 ─────────────────────────
 const r2 = new S3Client({
   region: 'auto',
   endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
@@ -344,63 +284,30 @@ app.get('/status', (req, res) => {
   res.json({
     status: 'online',
     timestamp: new Date(),
-    websocket_clients: clientes.size,
+    websocket_clients: clientesWs.size,
   });
 });
 
-// ─── CLIENTES DO USUÁRIO ─────────────────────────
-app.get('/me/clientes', autenticarToken, async (req, res) => {
+// ─── FEED GERAL ─────────────────────────
+app.get('/feed', autenticarToken, async (req, res) => {
   try {
-    const resultado = await pool.query(
-      `
-      SELECT c.id, c.nome, uc.papel
-      FROM clientes c
-      INNER JOIN usuarios_clientes uc ON uc.cliente_id = c.id
-      WHERE uc.usuario_id = $1 AND c.ativo = true
-      ORDER BY c.nome ASC
-      `,
-      [req.usuario.id]
-    );
-
-    res.json(resultado.rows);
-  } catch (err) {
-    console.error('Erro ao listar clientes:', err);
-    res.status(500).json({ erro: 'Erro ao listar clientes' });
-  }
-});
-
-// ─── QUADRAS DO CLIENTE ─────────────────────────
-app.get('/clientes/:clienteId/quadras', autenticarToken, verificarAcessoCliente, async (req, res) => {
-  try {
-    const resultado = await pool.query(
-      `
-      SELECT id, nome, ativa
-      FROM quadras
-      WHERE cliente_id = $1 AND ativa = true
-      ORDER BY nome ASC
-      `,
-      [req.clienteId]
-    );
-
-    res.json(resultado.rows);
-  } catch (err) {
-    console.error('Erro ao listar quadras:', err);
-    res.status(500).json({ erro: 'Erro ao listar quadras' });
-  }
-});
-
-// ─── CLIPES DA QUADRA ─────────────────────────
-app.get('/quadras/:quadraId/clips', autenticarToken, verificarAcessoQuadra, async (req, res) => {
-  try {
-    const resultado = await pool.query(
-      `
-      SELECT nome, criado_em
+    const resultado = await pool.query(`
+      SELECT 
+        clips.nome,
+        clips.criado_em,
+        clips.cliente_id,
+        clips.quadra_id,
+        clips.camera_id,
+        clientes.nome AS cliente_nome,
+        quadras.nome AS quadra_nome
       FROM clips
-      WHERE quadra_id = $1
-      ORDER BY criado_em DESC
-      `,
-      [req.quadra.id]
-    );
+      INNER JOIN clientes ON clientes.id = clips.cliente_id
+      INNER JOIN quadras ON quadras.id = clips.quadra_id
+      WHERE clientes.ativo = true
+        AND quadras.ativa = true
+      ORDER BY clips.criado_em DESC
+      LIMIT 50
+    `);
 
     const arquivos = await Promise.all(
       resultado.rows.map(async (clip) => {
@@ -417,6 +324,124 @@ app.get('/quadras/:quadraId/clips', autenticarToken, verificarAcessoQuadra, asyn
           nome: clip.nome,
           url: signedUrl,
           criado: clip.criado_em,
+          cliente_id: clip.cliente_id,
+          quadra_id: clip.quadra_id,
+          camera_id: clip.camera_id,
+          cliente_nome: clip.cliente_nome,
+          quadra_nome: clip.quadra_nome,
+        };
+      })
+    );
+
+    res.json(arquivos);
+  } catch (err) {
+    console.error('Erro ao carregar feed:', err);
+    res.status(500).json({ erro: 'Erro ao carregar feed' });
+  }
+});
+
+// ─── LISTAR TODAS AS ARENAS ─────────────────────────
+app.get('/clientes', autenticarToken, async (req, res) => {
+  try {
+    const resultado = await pool.query(`
+      SELECT id, nome
+      FROM clientes
+      WHERE ativo = true
+      ORDER BY nome ASC
+    `);
+
+    res.json(resultado.rows);
+  } catch (err) {
+    console.error('Erro ao listar clientes:', err);
+    res.status(500).json({ erro: 'Erro ao listar clientes' });
+  }
+});
+
+// ─── LISTAR QUADRAS DE UMA ARENA ─────────────────────────
+app.get('/clientes/:clienteId/quadras', autenticarToken, async (req, res) => {
+  try {
+    const clienteId = Number(req.params.clienteId);
+
+    if (!clienteId) {
+      return res.status(400).json({ erro: 'Arena inválida' });
+    }
+
+    const resultado = await pool.query(
+      `
+      SELECT id, nome, ativa
+      FROM quadras
+      WHERE cliente_id = $1
+        AND ativa = true
+      ORDER BY nome ASC
+      `,
+      [clienteId]
+    );
+
+    res.json(resultado.rows);
+  } catch (err) {
+    console.error('Erro ao listar quadras:', err);
+    res.status(500).json({ erro: 'Erro ao listar quadras' });
+  }
+});
+
+// ─── CLIPES DE UMA QUADRA ─────────────────────────
+app.get('/quadras/:quadraId/clips', autenticarToken, async (req, res) => {
+  try {
+    const quadraId = Number(req.params.quadraId);
+    const data = req.query.data;
+
+    if (!quadraId) {
+      return res.status(400).json({ erro: 'Quadra inválida' });
+    }
+
+    let query = `
+      SELECT 
+        clips.nome,
+        clips.criado_em,
+        clips.cliente_id,
+        clips.quadra_id,
+        clips.camera_id,
+        clientes.nome AS cliente_nome,
+        quadras.nome AS quadra_nome
+      FROM clips
+      INNER JOIN clientes ON clientes.id = clips.cliente_id
+      INNER JOIN quadras ON quadras.id = clips.quadra_id
+      WHERE clips.quadra_id = $1
+        AND clientes.ativo = true
+        AND quadras.ativa = true
+    `;
+
+    const params = [quadraId];
+
+    if (data) {
+      query += ` AND DATE(clips.criado_em) = $2`;
+      params.push(data);
+    }
+
+    query += ` ORDER BY clips.criado_em DESC`;
+
+    const resultado = await pool.query(query, params);
+
+    const arquivos = await Promise.all(
+      resultado.rows.map(async (clip) => {
+        const signedUrl = await getSignedUrl(
+          r2,
+          new GetObjectCommand({
+            Bucket: BUCKET,
+            Key: clip.nome,
+          }),
+          { expiresIn: 3600 }
+        );
+
+        return {
+          nome: clip.nome,
+          url: signedUrl,
+          criado: clip.criado_em,
+          cliente_id: clip.cliente_id,
+          quadra_id: clip.quadra_id,
+          camera_id: clip.camera_id,
+          cliente_nome: clip.cliente_nome,
+          quadra_nome: clip.quadra_nome,
         };
       })
     );

@@ -500,20 +500,34 @@ app.post('/upload', autenticarToken, upload.single('file'), async (req, res) => 
 });
 
 // ─── LISTAR CLIPES ─────────────────────────
+// ─── LISTAR CLIPES ─────────────────────────
 app.get('/clips', autenticarToken, async (req, res) => {
   try {
 
-    // Busca apenas clips do usuário
     const resultado = await pool.query(
       'SELECT nome, criado_em FROM clips WHERE usuario_id = $1 ORDER BY criado_em DESC',
       [req.usuario.id]
     );
 
-    const arquivos = resultado.rows.map(clip => ({
-      nome: clip.nome,
-      url: `${process.env.R2_PUBLIC_URL}/${clip.nome}`,
-      criado: clip.criado_em,
-    }));
+    const arquivos = await Promise.all(
+      resultado.rows.map(async (clip) => {
+
+        const signedUrl = await getSignedUrl(
+          r2,
+          new GetObjectCommand({
+            Bucket: BUCKET,
+            Key: clip.nome,
+          }),
+          { expiresIn: 3600 }
+        );
+
+        return {
+          nome: clip.nome,
+          url: signedUrl,
+          criado: clip.criado_em,
+        };
+      })
+    );
 
     res.json(arquivos);
 

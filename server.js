@@ -20,6 +20,7 @@ const {
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 const PORT = process.env.PORT || 4000;
 

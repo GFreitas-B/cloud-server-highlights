@@ -65,6 +65,14 @@ app.use(cors({
 
 app.use(express.json());
 
+function autenticarAdmin(req, res, next) {
+  if (req.usuario.role !== 'admin') {
+    return res.status(403).json({ erro: 'Acesso restrito ao administrador' });
+  }
+
+  next();
+}
+
 app.use(helmet({
   crossOriginResourcePolicy: false,
 }));
@@ -81,6 +89,7 @@ async function iniciarBanco() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS usuarios (
       id SERIAL PRIMARY KEY,
+      role TEXT DEFAULT 'usuario',
       nome TEXT NOT NULL,
       email TEXT UNIQUE NOT NULL,
       senha TEXT NOT NULL,
@@ -88,6 +97,11 @@ async function iniciarBanco() {
       criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  await pool.query(`
+  ALTER TABLE usuarios
+  ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'usuario'
+`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS clientes (
@@ -630,6 +644,7 @@ app.post('/auth/login', loginLimiter, async (req, res) => {
         id: usuario.id,
         email: usuario.email,
         nome: usuario.nome,
+        role: usuario.role,
       },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
@@ -642,6 +657,7 @@ app.post('/auth/login', loginLimiter, async (req, res) => {
         id: usuario.id,
         nome: usuario.nome,
         email: usuario.email,
+        role: usuario.role,
       },
     });
   } catch (err) {
@@ -909,6 +925,203 @@ app.delete('/clips/:nome', autenticarToken, async (req, res) => {
   } catch (err) {
     console.error('Erro ao deletar:', err);
     res.status(500).json({ erro: 'Erro ao deletar' });
+  }
+});
+
+app.get('/admin/clientes', autenticarToken, autenticarAdmin, async (req, res) => {
+  try {
+    const resultado = await pool.query(`
+      SELECT
+        c.id,
+        c.nome,
+        c.ativo,
+        c.criado_em,
+        COUNT(DISTINCT q.id) AS total_quadras,
+        COUNT(DISTINCT cam.id) AS total_cameras
+      FROM clientes c
+      LEFT JOIN quadras q ON q.cliente_id = c.id
+      LEFT JOIN cameras cam ON cam.cliente_id = c.id
+      GROUP BY c.id
+      ORDER BY c.criado_em DESC
+    `);
+
+    res.json(resultado.rows);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      erro: 'Erro ao listar clientes'
+    });
+  }
+});
+
+app.post('/admin/clientes', autenticarToken, autenticarAdmin, async (req, res) => {
+  try {
+    const { nome } = req.body;
+
+    if (!nome) {
+      return res.status(400).json({
+        erro: 'Nome obrigatório'
+      });
+    }
+
+    const resultado = await pool.query(
+      `
+      INSERT INTO clientes (nome)
+      VALUES ($1)
+      RETURNING *
+      `,
+      [nome]
+    );
+
+    res.json({
+      ok: true,
+      cliente: resultado.rows[0]
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      erro: 'Erro ao criar cliente'
+    });
+  }
+});
+
+app.post('/admin/clientes/:clienteId/quadras', autenticarToken, autenticarAdmin, async (req, res) => {
+  try {
+    const clienteId = Number(req.params.clienteId);
+    const { nome } = req.body;
+
+    const resultado = await pool.query(
+      `
+      INSERT INTO quadras (cliente_id, nome)
+      VALUES ($1, $2)
+      RETURNING *
+      `,
+      [clienteId, nome]
+    );
+
+    res.json({
+      ok: true,
+      quadra: resultado.rows[0]
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      erro: 'Erro ao criar quadra'
+    });
+  }
+});
+
+app.post('/admin/quadras/:quadraId/cameras', autenticarToken, autenticarAdmin, async (req, res) => {
+  try {
+    const quadraId = Number(req.params.quadraId);
+    const { nome } = req.body;
+
+    const quadra = await pool.query(
+      `
+      SELECT *
+      FROM quadras
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [quadraId]
+    );
+
+    if (quadra.rows.length === 0) {
+      return res.status(404).json({
+        erro: 'Quadra não encontrada'
+      });
+    }
+
+    const clienteId = quadra.rows[0].cliente_id;
+
+    const apiKey = `hl_cam_${uuidv4().replace(/-/g, '')}`;
+
+    const resultado = await pool.query(
+      `
+      INSERT INTO cameras (
+        cliente_id,
+        quadra_id,
+        nome,
+        api_key
+      )
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+      `,
+      [
+        clienteId,
+        quadraId,
+        nome,
+        apiKey
+      ]
+    );
+
+    res.json({
+      ok: true,
+      camera: resultado.rows[0]
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      erro: 'Erro ao criar câmera'
+    });
+  }
+});
+
+app.get('/admin/clientes/:clienteId/estrutura', autenticarToken, autenticarAdmin, async (req, res) => {
+  try {
+    const clienteId = Number(req.params.clienteId);
+
+    const cliente = await pool.query(
+      `
+      SELECT *
+      FROM clientes
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [clienteId]
+    );
+
+    if (cliente.rows.length === 0) {
+      return res.status(404).json({
+        erro: 'Cliente não encontrado'
+      });
+    }
+
+    const quadras = await pool.query(
+      `
+      SELECT *
+      FROM quadras
+      WHERE cliente_id = $1
+      ORDER BY id ASC
+      `,
+      [clienteId]
+    );
+
+    const cameras = await pool.query(
+      `
+      SELECT *
+      FROM cameras
+      WHERE cliente_id = $1
+      ORDER BY id ASC
+      `,
+      [clienteId]
+    );
+
+    res.json({
+      cliente: cliente.rows[0],
+      quadras: quadras.rows,
+      cameras: cameras.rows
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      erro: 'Erro ao carregar estrutura'
+    });
   }
 });
 

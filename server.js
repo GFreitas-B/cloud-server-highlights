@@ -939,7 +939,7 @@ app.get('/admin/clientes', autenticarToken, autenticarAdmin, async (req, res) =>
       SELECT
         c.id,
         c.nome,
-        c.image_url,
+        c.imagem_url,
         c.ativo,
         c.criado_em,
         COUNT(DISTINCT q.id) AS total_quadras,

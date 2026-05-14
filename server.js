@@ -1131,6 +1131,48 @@ app.get('/admin/clientes/:clienteId/estrutura', autenticarToken, autenticarAdmin
   }
 });
 
+// ─── ADMIN: REMOVER CAMERA ─────────────────────────
+app.delete('/admin/cameras/:id', autenticarToken, autenticarAdmin, async (req, res) => {
+  try {
+    const cameraId = Number(req.params.id);
+
+    const camera = await pool.query(
+      `
+      SELECT *
+      FROM cameras
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [cameraId]
+    );
+
+    if (camera.rows.length === 0) {
+      return res.status(404).json({
+        erro: 'Câmera não encontrada'
+      });
+    }
+
+    await pool.query(
+      `
+      DELETE FROM cameras
+      WHERE id = $1
+      `,
+      [cameraId]
+    );
+
+    res.json({
+      ok: true
+    });
+
+  } catch (err) {
+    console.error(err);
+
+    res.status(500).json({
+      erro: 'Erro ao remover câmera'
+    });
+  }
+});
+
 // ─── START ─────────────────────────
 iniciarBanco()
   .then(() => {

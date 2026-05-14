@@ -113,6 +113,11 @@ async function iniciarBanco() {
   `);
 
   await pool.query(`
+  ALTER TABLE clientes
+  ADD COLUMN IF NOT EXISTS imagem_url TEXT
+`);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS usuarios_clientes (
       id SERIAL PRIMARY KEY,
       usuario_id INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
@@ -934,6 +939,7 @@ app.get('/admin/clientes', autenticarToken, autenticarAdmin, async (req, res) =>
       SELECT
         c.id,
         c.nome,
+        c.image_url,
         c.ativo,
         c.criado_em,
         COUNT(DISTINCT q.id) AS total_quadras,
@@ -957,7 +963,7 @@ app.get('/admin/clientes', autenticarToken, autenticarAdmin, async (req, res) =>
 
 app.post('/admin/clientes', autenticarToken, autenticarAdmin, async (req, res) => {
   try {
-    const { nome } = req.body;
+    const { nome, imagem_url } = req.body;
 
     if (!nome) {
       return res.status(400).json({
@@ -967,11 +973,11 @@ app.post('/admin/clientes', autenticarToken, autenticarAdmin, async (req, res) =
 
     const resultado = await pool.query(
       `
-      INSERT INTO clientes (nome)
-      VALUES ($1)
+      INSERT INTO clientes (nome, imagem_url)
+      VALUES ($1, $2)
       RETURNING *
       `,
-      [nome]
+      [nome, imagem_url || null]
     );
 
     res.json({

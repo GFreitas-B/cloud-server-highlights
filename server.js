@@ -1173,6 +1173,52 @@ app.delete('/admin/cameras/:id', autenticarToken, autenticarAdmin, async (req, r
   }
 });
 
+// ─── ADMIN: REMOVER QUADRA ─────────────────────────
+app.delete('/admin/quadras/:id', autenticarToken, autenticarAdmin, async (req, res) => {
+  try {
+    const quadraId = Number(req.params.id);
+
+    const cameras = await pool.query(
+      `
+      SELECT id
+      FROM cameras
+      WHERE quadra_id = $1
+      LIMIT 1
+      `,
+      [quadraId]
+    );
+
+    if (cameras.rows.length > 0) {
+      return res.status(400).json({
+        erro: 'Não é possível remover a quadra enquanto houver câmeras vinculadas.'
+      });
+    }
+
+    const resultado = await pool.query(
+      `
+      DELETE FROM quadras
+      WHERE id = $1
+      RETURNING *
+      `,
+      [quadraId]
+    );
+
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({
+        erro: 'Quadra não encontrada'
+      });
+    }
+
+    res.json({ ok: true });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      erro: 'Erro ao remover quadra'
+    });
+  }
+});
+
 // ─── START ─────────────────────────
 iniciarBanco()
   .then(() => {

@@ -1219,6 +1219,52 @@ app.delete('/admin/quadras/:id', autenticarToken, autenticarAdmin, async (req, r
   }
 });
 
+// ─── ADMIN: REMOVER ARENA ─────────────────────────
+app.delete('/admin/clientes/:id', autenticarToken, autenticarAdmin, async (req, res) => {
+  try {
+    const clienteId = Number(req.params.id);
+
+    const quadras = await pool.query(
+      `
+      SELECT id
+      FROM quadras
+      WHERE cliente_id = $1
+      LIMIT 1
+      `,
+      [clienteId]
+    );
+
+    if (quadras.rows.length > 0) {
+      return res.status(400).json({
+        erro: 'Não é possível remover a arena enquanto houver quadras vinculadas.'
+      });
+    }
+
+    const resultado = await pool.query(
+      `
+      DELETE FROM clientes
+      WHERE id = $1
+      RETURNING *
+      `,
+      [clienteId]
+    );
+
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({
+        erro: 'Arena não encontrada'
+      });
+    }
+
+    res.json({ ok: true });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      erro: 'Erro ao remover arena'
+    });
+  }
+});
+
 // ─── START ─────────────────────────
 iniciarBanco()
   .then(() => {

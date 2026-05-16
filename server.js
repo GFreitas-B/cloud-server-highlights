@@ -172,6 +172,41 @@ async function iniciarBanco() {
     )
   `);
 
+  await pool.query(`
+  CREATE TABLE IF NOT EXISTS servidores_locais (
+    id SERIAL PRIMARY KEY,
+    cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+    nome TEXT NOT NULL,
+    token TEXT UNIQUE NOT NULL,
+    online BOOLEAN DEFAULT false,
+    cpu_percent NUMERIC DEFAULT 0,
+    ram_percent NUMERIC DEFAULT 0,
+    disco_percent NUMERIC DEFAULT 0,
+    ultimo_ping TIMESTAMP,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+  await pool.query(`
+  ALTER TABLE cameras
+  ADD COLUMN IF NOT EXISTS online BOOLEAN DEFAULT false
+`);
+
+  await pool.query(`
+  ALTER TABLE cameras
+  ADD COLUMN IF NOT EXISTS rtsp_ok BOOLEAN DEFAULT false
+`);
+
+  await pool.query(`
+  ALTER TABLE cameras
+  ADD COLUMN IF NOT EXISTS replay_ok BOOLEAN DEFAULT false
+`);
+
+  await pool.query(`
+  ALTER TABLE cameras
+  ADD COLUMN IF NOT EXISTS ultimo_ping TIMESTAMP
+`);
+
   console.log('[DB] Banco de dados PostgreSQL iniciado!');
 }
 
@@ -1120,8 +1155,19 @@ app.get('/admin/clientes/:clienteId/estrutura', autenticarToken, autenticarAdmin
     res.json({
       cliente: cliente.rows[0],
       quadras: quadras.rows,
-      cameras: cameras.rows
+      cameras: cameras.rows,
+      servidores: servidores.rows,
     });
+
+    const servidores = await pool.query(
+      `
+      SELECT *
+      FROM servidores_locais
+      WHERE cliente_id = $1
+      ORDER BY id ASC
+      `,
+      [clienteId]
+    );
 
   } catch (err) {
     console.error(err);
@@ -1262,6 +1308,37 @@ app.delete('/admin/clientes/:id', autenticarToken, autenticarAdmin, async (req, 
     res.status(500).json({
       erro: 'Erro ao remover arena'
     });
+  }
+});
+
+// ─── ADMIN: CRIAR SERVIDOR LOCAL ─────────────────────────
+app.post('/admin/clientes/:clienteId/servidores', autenticarToken, autenticarAdmin, async (req, res) => {
+  try {
+    const clienteId = Number(req.params.clienteId);
+    const { nome } = req.body;
+
+    if (!nome) {
+      return res.status(400).json({ erro: 'Nome obrigatório' });
+    }
+
+    const token = `hl_srv_${uuidv4().replace(/-/g, '')}`;
+
+    const resultado = await pool.query(
+      `
+      INSERT INTO servidores_locais (cliente_id, nome, token)
+      VALUES ($1, $2, $3)
+      RETURNING *
+      `,
+      [clienteId, nome, token]
+    );
+
+    res.json({
+      ok: true,
+      servidor: resultado.rows[0],
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ erro: 'Erro ao criar servidor local' });
   }
 });
 

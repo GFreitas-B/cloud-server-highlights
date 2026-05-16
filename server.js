@@ -1152,13 +1152,6 @@ app.get('/admin/clientes/:clienteId/estrutura', autenticarToken, autenticarAdmin
       [clienteId]
     );
 
-    res.json({
-      cliente: cliente.rows[0],
-      quadras: quadras.rows,
-      cameras: cameras.rows,
-      servidores: servidores.rows,
-    });
-
     const servidores = await pool.query(
       `
       SELECT *
@@ -1168,6 +1161,15 @@ app.get('/admin/clientes/:clienteId/estrutura', autenticarToken, autenticarAdmin
       `,
       [clienteId]
     );
+
+    res.json({
+      cliente: cliente.rows[0],
+      quadras: quadras.rows,
+      cameras: cameras.rows,
+      servidores: servidores.rows,
+    });
+
+
 
   } catch (err) {
     console.error(err);

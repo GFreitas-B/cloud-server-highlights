@@ -968,6 +968,31 @@ app.delete('/clips/:nome', autenticarToken, async (req, res) => {
   }
 });
 
+function autenticarServidor(req, res, next) {
+  try {
+    const auth = req.headers.authorization;
+
+    if (!auth) {
+      return res.status(401).json({
+        erro: 'Token não fornecido',
+      });
+    }
+
+    const token = auth.replace('Bearer ', '');
+
+    req.serverToken = token;
+
+    next();
+
+  } catch (err) {
+    console.error(err);
+
+    res.status(401).json({
+      erro: 'Token inválido',
+    });
+  }
+}
+
 app.get('/admin/clientes', autenticarToken, autenticarAdmin, async (req, res) => {
   try {
     const resultado = await pool.query(`
@@ -1079,6 +1104,7 @@ app.post('/admin/quadras/:quadraId/cameras', autenticarToken, autenticarAdmin, a
     const clienteId = quadra.rows[0].cliente_id;
 
     const apiKey = `hl_cam_${uuidv4().replace(/-/g, '')}`;
+    const idLocal = `cam_${uuidv4().replace(/-/g, '').slice(0, 12)}`;
 
     const resultado = await pool.query(
       `
@@ -1086,16 +1112,18 @@ app.post('/admin/quadras/:quadraId/cameras', autenticarToken, autenticarAdmin, a
         cliente_id,
         quadra_id,
         nome,
-        api_key
+        api_key,
+        id_local
       )
-      VALUES ($1, $2, $3, $4)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING *
       `,
       [
         clienteId,
         quadraId,
         nome,
-        apiKey
+        apiKey,
+        idLocal,
       ]
     );
 
@@ -1341,6 +1369,90 @@ app.post('/admin/clientes/:clienteId/servidores', autenticarToken, autenticarAdm
   } catch (err) {
     console.error(err);
     res.status(500).json({ erro: 'Erro ao criar servidor local' });
+  }
+});
+
+// ─── HEALTH MONITOR ─────────────────────────
+app.post('/health/ping', autenticarServidor, async (req, res) => {
+  try {
+    const token = req.serverToken;
+
+    const {
+      cpu_percent,
+      ram_percent,
+      disco_percent,
+      cameras,
+    } = req.body;
+
+    const servidor = await pool.query(
+      `
+      SELECT *
+      FROM servidores_locais
+      WHERE token = $1
+      LIMIT 1
+      `,
+      [token]
+    );
+
+    if (servidor.rows.length === 0) {
+      return res.status(404).json({
+        erro: 'Servidor não encontrado',
+      });
+    }
+
+    const servidorId = servidor.rows[0].id;
+
+    await pool.query(
+      `
+      UPDATE servidores_locais
+      SET
+        online = true,
+        cpu_percent = $1,
+        ram_percent = $2,
+        disco_percent = $3,
+        ultimo_ping = NOW()
+      WHERE id = $4
+      `,
+      [
+        cpu_percent,
+        ram_percent,
+        disco_percent,
+        servidorId,
+      ]
+    );
+
+    if (Array.isArray(cameras)) {
+      for (const camera of cameras) {
+        await pool.query(
+          `
+          UPDATE cameras
+          SET
+            online = $1,
+            rtsp_ok = $2,
+            replay_ok = $3,
+            ultimo_ping = NOW()
+          WHERE id_local = $4
+          `,
+          [
+            camera.online,
+            camera.rtsp_ok,
+            camera.replay_ok,
+            camera.camera_id,
+          ]
+        );
+      }
+    }
+
+    res.json({
+      ok: true,
+    });
+
+  } catch (err) {
+    console.error(err);
+
+    res.status(500).json({
+      erro: 'Erro no health monitor',
+    });
   }
 });
 

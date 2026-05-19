@@ -207,6 +207,19 @@ async function iniciarBanco() {
   ADD COLUMN IF NOT EXISTS ultimo_ping TIMESTAMP
 `);
 
+  await pool.query(`
+  CREATE TABLE IF NOT EXISTS licenses (
+    id SERIAL PRIMARY KEY,
+    cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+    license_key TEXT UNIQUE NOT NULL,
+    status TEXT DEFAULT 'active',
+    max_quadras INTEGER DEFAULT 1,
+    max_cameras INTEGER DEFAULT 2,
+    expires_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
   console.log('[DB] Banco de dados PostgreSQL iniciado!');
 }
 
@@ -1190,11 +1203,22 @@ app.get('/admin/clientes/:clienteId/estrutura', autenticarToken, autenticarAdmin
       [clienteId]
     );
 
+    const licenses = await pool.query(
+      `
+      SELECT *
+      FROM licenses
+      WHERE cliente_id = $1
+      ORDER BY created_at DESC
+      `,
+      [clienteId]
+    );
+
     res.json({
       cliente: cliente.rows[0],
       quadras: quadras.rows,
       cameras: cameras.rows,
       servidores: servidores.rows,
+      licenses: licenses.rows,
     });
 
 
@@ -1452,6 +1476,123 @@ app.post('/health/ping', autenticarServidor, async (req, res) => {
 
     res.status(500).json({
       erro: 'Erro no health monitor',
+    });
+  }
+});
+
+app.post('/admin/clientes/:clienteId/licenses', autenticarToken, autenticarAdmin, async (req, res) => {
+  try {
+    const clienteId = Number(req.params.clienteId);
+
+    const {
+      max_quadras = 1,
+      max_cameras = 2,
+      expires_at = null,
+    } = req.body;
+
+    const licenseKey = `HL-LIC-${uuidv4()
+      .replace(/-/g, '')
+      .toUpperCase()
+      .slice(0, 16)}`;
+
+    const resultado = await pool.query(
+      `
+      INSERT INTO licenses (
+        cliente_id,
+        license_key,
+        max_quadras,
+        max_cameras,
+        expires_at
+      )
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+      `,
+      [
+        clienteId,
+        licenseKey,
+        max_quadras,
+        max_cameras,
+        expires_at,
+      ]
+    );
+
+    res.json({
+      ok: true,
+      license: resultado.rows[0],
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      erro: 'Erro ao criar licença',
+    });
+  }
+});
+
+app.post('/license/validate', async (req, res) => {
+  try {
+    const {
+      license_key,
+      hostname,
+      version,
+    } = req.body;
+
+    if (!license_key) {
+      return res.status(400).json({
+        valid: false,
+        erro: 'Licença não informada',
+      });
+    }
+
+    const resultado = await pool.query(
+      `
+      SELECT
+        l.*,
+        c.nome AS cliente_nome
+      FROM licenses l
+      JOIN clientes c ON c.id = l.cliente_id
+      WHERE l.license_key = $1
+      LIMIT 1
+      `,
+      [license_key]
+    );
+
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({
+        valid: false,
+        erro: 'Licença não encontrada',
+      });
+    }
+
+    const license = resultado.rows[0];
+
+    if (license.status !== 'active') {
+      return res.status(403).json({
+        valid: false,
+        erro: 'Licença bloqueada ou inativa',
+      });
+    }
+
+    if (license.expires_at && new Date(license.expires_at) < new Date()) {
+      return res.status(403).json({
+        valid: false,
+        erro: 'Licença expirada',
+      });
+    }
+
+    res.json({
+      valid: true,
+      cliente_id: license.cliente_id,
+      cliente_nome: license.cliente_nome,
+      max_quadras: license.max_quadras,
+      max_cameras: license.max_cameras,
+      expires_at: license.expires_at,
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      valid: false,
+      erro: 'Erro ao validar licença',
     });
   }
 });

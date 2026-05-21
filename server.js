@@ -220,6 +220,21 @@ async function iniciarBanco() {
   )
 `);
 
+  await pool.query(`
+  ALTER TABLE licenses
+  ADD COLUMN IF NOT EXISTS hardware_id TEXT
+`);
+
+  await pool.query(`
+  ALTER TABLE licenses
+  ADD COLUMN IF NOT EXISTS activated_at TIMESTAMP
+`);
+
+  await pool.query(`
+  ALTER TABLE licenses
+  ADD COLUMN IF NOT EXISTS last_check_at TIMESTAMP
+`);
+
   console.log('[DB] Banco de dados PostgreSQL iniciado!');
 }
 
@@ -1532,6 +1547,7 @@ app.post('/license/validate', async (req, res) => {
   try {
     const {
       license_key,
+      hardware_id,
       hostname,
       version,
     } = req.body;
@@ -1540,6 +1556,13 @@ app.post('/license/validate', async (req, res) => {
       return res.status(400).json({
         valid: false,
         erro: 'Licença não informada',
+      });
+    }
+
+    if (!hardware_id) {
+      return res.status(400).json({
+        valid: false,
+        erro: 'Hardware ID não informado',
       });
     }
 
@@ -1579,6 +1602,34 @@ app.post('/license/validate', async (req, res) => {
       });
     }
 
+    if (!license.hardware_id) {
+      await pool.query(
+        `
+    UPDATE licenses
+    SET
+      hardware_id = $1,
+      activated_at = NOW(),
+      last_check_at = NOW()
+    WHERE id = $2
+    `,
+        [hardware_id, license.id]
+      );
+    } else if (license.hardware_id !== hardware_id) {
+      return res.status(403).json({
+        valid: false,
+        erro: 'Licença já ativada em outro equipamento',
+      });
+    } else {
+      await pool.query(
+        `
+    UPDATE licenses
+    SET last_check_at = NOW()
+    WHERE id = $1
+    `,
+        [license.id]
+      );
+    }
+
     res.json({
       valid: true,
       cliente_id: license.cliente_id,
@@ -1595,6 +1646,9 @@ app.post('/license/validate', async (req, res) => {
       erro: 'Erro ao validar licença',
     });
   }
+
+
+
 });
 
 // ─── START ─────────────────────────

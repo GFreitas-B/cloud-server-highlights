@@ -162,6 +162,11 @@ async function iniciarBanco() {
   `);
 
   await pool.query(`
+  ALTER TABLE clips
+  ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS codigos (
       id SERIAL PRIMARY KEY,
       email TEXT NOT NULL,

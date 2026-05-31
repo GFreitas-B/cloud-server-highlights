@@ -382,6 +382,7 @@ app.get('/feed', autenticarToken, async (req, res) => {
       SELECT 
         clips.nome,
         clips.criado_em,
+        clips.expires_at,
         clips.cliente_id,
         clips.quadra_id,
         clips.camera_id,
@@ -392,6 +393,7 @@ app.get('/feed', autenticarToken, async (req, res) => {
       INNER JOIN quadras ON quadras.id = clips.quadra_id
       WHERE clientes.ativo = true
         AND quadras.ativa = true
+        AND clips.expires_at > NOW()
       ORDER BY clips.criado_em DESC
       LIMIT 50
     `);
@@ -411,6 +413,7 @@ app.get('/feed', autenticarToken, async (req, res) => {
           nome: clip.nome,
           url: signedUrl,
           criado: clip.criado_em,
+          expires_at: clip.expires_at,
           cliente_id: clip.cliente_id,
           quadra_id: clip.quadra_id,
           camera_id: clip.camera_id,
@@ -426,6 +429,7 @@ app.get('/feed', autenticarToken, async (req, res) => {
     res.status(500).json({ erro: 'Erro ao carregar feed' });
   }
 });
+
 
 // ─── LISTAR TODAS AS ARENAS ─────────────────────────
 app.get('/clientes', autenticarToken, async (req, res) => {
@@ -887,8 +891,14 @@ app.post('/upload', autenticarCamera, upload.single('file'), async (req, res) =>
 
     await pool.query(
       `
-      INSERT INTO clips (nome, cliente_id, quadra_id, camera_id)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO clips (
+        nome,
+        cliente_id,
+        quadra_id,
+        camera_id,
+        expires_at
+      )
+      VALUES ($1, $2, $3, $4, NOW() + INTERVAL '2 days')
       `,
       [
         nome,
@@ -911,6 +921,7 @@ app.post('/upload', autenticarCamera, upload.single('file'), async (req, res) =>
       nome,
       url: signedUrl,
       criado: new Date(),
+      expires_at: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000),
       cliente_id: req.camera.cliente_id,
       quadra_id: req.camera.quadra_id,
       camera_id: req.camera.id,

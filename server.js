@@ -489,6 +489,7 @@ app.get('/quadras/:quadraId/clips', autenticarToken, async (req, res) => {
       SELECT 
         clips.nome,
         clips.criado_em,
+        clips.expires_at,
         clips.cliente_id,
         clips.quadra_id,
         clips.camera_id,
@@ -500,6 +501,7 @@ app.get('/quadras/:quadraId/clips', autenticarToken, async (req, res) => {
       WHERE clips.quadra_id = $1
         AND clientes.ativo = true
         AND quadras.ativa = true
+        AND clips.expires_at > NOW()
     `;
 
     const params = [quadraId];
@@ -528,6 +530,7 @@ app.get('/quadras/:quadraId/clips', autenticarToken, async (req, res) => {
           nome: clip.nome,
           url: signedUrl,
           criado: clip.criado_em,
+          expires_at: clip.expires_at,
           cliente_id: clip.cliente_id,
           quadra_id: clip.quadra_id,
           camera_id: clip.camera_id,
@@ -1667,14 +1670,32 @@ app.post('/license/validate', async (req, res) => {
 
 });
 
+async function limparClipesExpirados() {
+  try {
+    const resultado = await pool.query(`
+      DELETE FROM clips
+      WHERE expires_at < NOW()
+      RETURNING nome
+    `);
+
+    if (resultado.rows.length > 0) {
+      console.log(
+        `[CLEANUP] ${resultado.rows.length} clipe(s) expirado(s) removido(s) do banco`
+      );
+    }
+  } catch (err) {
+    console.error('[CLEANUP ERRO]', err);
+  }
+}
+
 // ─── START ─────────────────────────
 iniciarBanco()
   .then(() => {
+    limparClipesExpirados();
+
+    setInterval(limparClipesExpirados, 60 * 60 * 1000);
+
     server.listen(PORT, () => {
       console.log(`☁️ Cloud server rodando na porta ${PORT}`);
     });
   })
-  .catch((err) => {
-    console.error('[DB] Erro ao iniciar banco:', err);
-    process.exit(1);
-  });
